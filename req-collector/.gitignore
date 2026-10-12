@@ -1,0 +1,16 @@
+# 运行配置：含钉钉密钥与数据库密码，绝不能入库
+# 首次运行程序会自动生成模板；部署时复制 config.example.json -> config.json
+config.json
+
+# 编译产物
+/kingdee-req-server
+/kingdee-req-server.exe
+/dist/
+*.exe
+*.log
+
+# 系统/编辑器
+.DS_Store
+__pycache__/
+.idea/
+.vscode/
