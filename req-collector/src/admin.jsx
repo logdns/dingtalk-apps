@@ -359,16 +359,23 @@ function AdminSettings() {
 // ---------------- 运行日志 ----------------
 function LogViewer() {
   const [lines, setLines] = useState([]);
+  const [files, setFiles] = useState([]);
+  const [logPath, setLogPath] = useState("");
+  const [pick, setPick] = useState("");
   const [loading, setLoading] = useState(false);
   const [auto, setAuto] = useState(true);
 
   const load = async () => {
     setLoading(true);
     const data = await window.WBAuth.api("/api/admin/logs");
-    if (data.ok) setLines(data.lines || []);
+    if (data.ok) { setLines(data.lines || []); setLogPath(data.file || ""); }
     setLoading(false);
   };
-  useEffect(() => { load(); }, []);
+  const loadFiles = async () => {
+    const data = await window.WBAuth.api("/api/admin/logs/files");
+    if (data.ok) setFiles(data.files || []);
+  };
+  useEffect(() => { load(); loadFiles(); }, []);
   useEffect(() => {
     if (!auto) return;
     const t = setInterval(load, 10000);
@@ -377,22 +384,47 @@ function LogViewer() {
 
   const clear = async () => {
     const data = await post("/api/admin/logs/clear", {});
-    if (data.ok) { setLines([]); Message.success("日志已清空"); }
+    if (data.ok) { setLines([]); Message.success("日志缓冲已清空（磁盘文件不受影响）"); }
     else Message.error(data.error || "操作失败");
+  };
+
+  // 下载走 ?token=，不能用 fetch（要触发浏览器下载）
+  const download = () => {
+    const q = pick ? "&file=" + encodeURIComponent(pick) : "";
+    window.open("/api/admin/logs/download?token=" + encodeURIComponent(window.WBAuth.getToken()) + q, "_blank");
   };
 
   return (
     <div>
-      <Space style={{ marginBottom: 12 }}>
+      <Space style={{ marginBottom: 12 }} wrap>
         <Button onClick={load} loading={loading}>刷新</Button>
         <Button onClick={() => setAuto(!auto)} type={auto ? "primary" : "default"}>
           {auto ? "自动刷新：开" : "自动刷新：关"}
         </Button>
         <Popconfirm title="确认清空日志缓冲？" onOk={clear}>
-          <Button status="danger" type="text">清空</Button>
+          <Button status="danger" type="text">清空缓冲</Button>
         </Popconfirm>
-        <Typography.Text type="secondary">保留最近 2000 行，每 10 秒自动刷新</Typography.Text>
+        <Typography.Text type="secondary">内存缓冲保留最近 2000 行，每 10 秒自动刷新</Typography.Text>
       </Space>
+
+      <div style={{ marginBottom: 12 }}>
+        <Space wrap>
+          <Typography.Text type="secondary">日志文件：</Typography.Text>
+          {files.length ? (
+            <Select value={pick || (files[0] && files[0].name) || ""} style={{ width: 320 }}
+              onChange={setPick}
+              options={files.map(f => ({
+                value: f.name,
+                label: f.name + (f.active ? "（当前）" : "") + "  " + window.WBAuth.formatSize(f.size)
+              }))} />
+          ) : (
+            <Typography.Text type="warning">未启用日志文件</Typography.Text>
+          )}
+          <Button type="primary" onClick={download} disabled={!files.length}>下载日志文件</Button>
+          <Typography.Text type="secondary" copyable={{ text: logPath }}>{logPath}</Typography.Text>
+        </Space>
+      </div>
+
       <pre style={{
         background: "#1d2129", color: "#c9d1d9", padding: 12, borderRadius: 6,
         maxHeight: 520, overflow: "auto", fontSize: 12, lineHeight: "18px",

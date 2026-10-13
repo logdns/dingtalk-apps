@@ -620,16 +620,27 @@ function AdminSettings() {
 // ---------------- 运行日志 ----------------
 function LogViewer() {
   const [lines, setLines] = useState([]);
+  const [files, setFiles] = useState([]);
+  const [logPath, setLogPath] = useState("");
+  const [pick, setPick] = useState("");
   const [loading, setLoading] = useState(false);
   const [auto, setAuto] = useState(true);
   const load = async () => {
     setLoading(true);
     const data = await window.WBAuth.api("/api/admin/logs");
-    if (data.ok) setLines(data.lines || []);
+    if (data.ok) {
+      setLines(data.lines || []);
+      setLogPath(data.file || "");
+    }
     setLoading(false);
+  };
+  const loadFiles = async () => {
+    const data = await window.WBAuth.api("/api/admin/logs/files");
+    if (data.ok) setFiles(data.files || []);
   };
   useEffect(() => {
     load();
+    loadFiles();
   }, []);
   useEffect(() => {
     if (!auto) return;
@@ -640,13 +651,20 @@ function LogViewer() {
     const data = await post("/api/admin/logs/clear", {});
     if (data.ok) {
       setLines([]);
-      Message.success("日志已清空");
+      Message.success("日志缓冲已清空（磁盘文件不受影响）");
     } else Message.error(data.error || "操作失败");
+  };
+
+  // 下载走 ?token=，不能用 fetch（要触发浏览器下载）
+  const download = () => {
+    const q = pick ? "&file=" + encodeURIComponent(pick) : "";
+    window.open("/api/admin/logs/download?token=" + encodeURIComponent(window.WBAuth.getToken()) + q, "_blank");
   };
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Space, {
     style: {
       marginBottom: 12
-    }
+    },
+    wrap: true
   }, /*#__PURE__*/React.createElement(Button, {
     onClick: load,
     loading: loading
@@ -659,9 +677,38 @@ function LogViewer() {
   }, /*#__PURE__*/React.createElement(Button, {
     status: "danger",
     type: "text"
-  }, "清空")), /*#__PURE__*/React.createElement(Typography.Text, {
+  }, "清空缓冲")), /*#__PURE__*/React.createElement(Typography.Text, {
     type: "secondary"
-  }, "保留最近 2000 行，每 10 秒自动刷新")), /*#__PURE__*/React.createElement("pre", {
+  }, "内存缓冲保留最近 2000 行，每 10 秒自动刷新")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(Space, {
+    wrap: true
+  }, /*#__PURE__*/React.createElement(Typography.Text, {
+    type: "secondary"
+  }, "日志文件："), files.length ? /*#__PURE__*/React.createElement(Select, {
+    value: pick || files[0] && files[0].name || "",
+    style: {
+      width: 320
+    },
+    onChange: setPick,
+    options: files.map(f => ({
+      value: f.name,
+      label: f.name + (f.active ? "（当前）" : "") + "  " + window.WBAuth.formatSize(f.size)
+    }))
+  }) : /*#__PURE__*/React.createElement(Typography.Text, {
+    type: "warning"
+  }, "未启用日志文件"), /*#__PURE__*/React.createElement(Button, {
+    type: "primary",
+    onClick: download,
+    disabled: !files.length
+  }, "下载日志文件"), /*#__PURE__*/React.createElement(Typography.Text, {
+    type: "secondary",
+    copyable: {
+      text: logPath
+    }
+  }, logPath))), /*#__PURE__*/React.createElement("pre", {
     style: {
       background: "#1d2129",
       color: "#c9d1d9",

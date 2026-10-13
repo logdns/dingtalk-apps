@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const AppVersion = "1.1.0"
+const AppVersion = "1.2.0"
 
 // 全局配置由 store.InitStore 赋值（见 store.go 的 cfg），页面标题/下拉选项等都从它读取
 
@@ -36,12 +36,15 @@ type Config struct {
 	AppTitle      string   `json:"app_title"` // 应用标题（页面标题、通知标题，默认「需求收集」）
 	MySQL         MySQLCfg `json:"mysql"`
 	DingTalk      DingCfg  `json:"dingtalk"`
-	AdminPassword string   `json:"admin_password"` // 管理面板初始密码（数据库已有 kr1$ 格式密码时不再覆盖）
-	SessionDays   int      `json:"session_days"`   // 登录令牌有效期（天）
-	UploadsDir    string   `json:"uploads_dir"`    // 附件本地保存目录（默认 ./uploads）
-	DriveSpaceID  string   `json:"drive_space_id"` // 可选：钉盘空间 ID（留空自动取上传人自己的钉盘空间）
-	MaxUploadMB   int      `json:"max_upload_mb"`  // 单个附件上限（MB，默认 20，封顶 100）
-	Options       Options  `json:"options"`        // 可选：业务下拉项
+	AdminPassword string   `json:"admin_password"`  // 管理面板初始密码（数据库已有 kr1$ 格式密码时不再覆盖）
+	SessionDays   int      `json:"session_days"`    // 登录令牌有效期（天）
+	UploadsDir    string   `json:"uploads_dir"`     // 附件本地保存目录（默认 ./uploads）
+	DriveSpaceID  string   `json:"drive_space_id"`  // 可选：钉盘空间 ID（留空自动取上传人自己的钉盘空间）
+	MaxUploadMB   int      `json:"max_upload_mb"`   // 单个附件上限（MB，默认 20，封顶 100）
+	LogDir        string   `json:"log_dir"`         // 日志目录（默认 ./logs）
+	LogMaxMB      int      `json:"log_max_mb"`      // 单个日志文件上限（MB，默认 20）
+	LogRetainDays int      `json:"log_retain_days"` // 归档日志保留天数（默认 30）
+	Options       Options  `json:"options"`         // 可选：业务下拉项
 }
 
 // AppTitleOrDefault 页面/通知标题
@@ -113,6 +116,15 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.MaxUploadMB > 100 {
 		cfg.MaxUploadMB = 100
+	}
+	if cfg.LogDir == "" {
+		cfg.LogDir = "logs"
+	}
+	if cfg.LogMaxMB <= 0 {
+		cfg.LogMaxMB = 20
+	}
+	if cfg.LogRetainDays <= 0 {
+		cfg.LogRetainDays = 30
 	}
 	return cfg, nil
 }

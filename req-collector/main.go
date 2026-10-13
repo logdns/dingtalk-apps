@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 )
@@ -53,6 +54,9 @@ const configTemplate = `{
   "uploads_dir": "uploads",
   "drive_space_id": "",
   "max_upload_mb": 20,
+  "log_dir": "logs",
+  "log_max_mb": 20,
+  "log_retain_days": 30,
   "options": {
     "departments": ["研发部", "产品部", "销售部", "财务部", "人事部", "其他"],
     "req_types": ["功能需求", "字段需求", "报表需求", "流程优化", "接口集成", "其他"],
@@ -64,6 +68,30 @@ const configTemplate = `{
 `
 
 var appLog = NewLogRing(2000) // 管理面板在线日志（最近 2000 行）
+var fileLog *RotatingFileWriter
+
+// setupLogFile 根据配置初始化日志落盘；失败时仅警告，不影响服务启动
+func setupLogFile(cfg *Config) {
+	dir := cfg.LogDir
+	if dir == "" {
+		dir = "logs"
+	}
+	path := filepath.Join(dir, "server.log")
+	if fileLog != nil && fileLog.FilePath() == path {
+		return // 路径未变，沿用已打开的文件
+	}
+	w, err := NewRotatingFileWriter(path, cfg.LogMaxMB, cfg.LogRetainDays)
+	if err != nil {
+		log.SetOutput(io.MultiWriter(os.Stderr, appLog))
+		log.Printf("警告：日志文件初始化失败（%v），仅输出到控制台", err)
+		return
+	}
+	if fileLog != nil {
+		_ = fileLog.Close()
+	}
+	fileLog = w
+	log.SetOutput(io.MultiWriter(os.Stderr, appLog, fileLog))
+}
 
 func main() {
 	log.SetOutput(io.MultiWriter(os.Stderr, appLog))
@@ -76,6 +104,9 @@ func main() {
 		return
 	}
 
+	// 配置文件加载前先用默认位置落盘，保证「配置缺失」这类早期错误也有日志
+	setupLogFile(&Config{})
+
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
 		// 配置文件不存在 → 自动生成模板，提示编辑后重启
@@ -85,6 +116,12 @@ func main() {
 			fatal("未找到配置文件，已在同目录生成模板 %s\n请用记事本打开，填好 MySQL 和钉钉信息后保存，再重新启动本程序。", *configPath)
 		}
 		fatal("加载配置失败: %v", err)
+	}
+
+	// 配置生效后再按配置项（日志目录/大小/保留天数）初始化一次
+	setupLogFile(cfg)
+	if fileLog != nil {
+		log.Printf("日志文件: %s（单文件上限 %dMB，保留 %d 天）", fileLog.FilePath(), cfg.LogMaxMB, cfg.LogRetainDays)
 	}
 
 	if err := InitStore(cfg); err != nil {

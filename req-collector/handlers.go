@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +24,7 @@ import (
 //go:embed static
 var staticFS embed.FS
 
-const staticVer = "20261013a"
+const staticVer = "20261013b"
 
 // 下拉选项全部来自 config.json 的 options 段，未配置时用通用默认值（见 config.go）
 
@@ -192,6 +194,8 @@ func NewRouter() *http.ServeMux {
 	mux.HandleFunc("POST /api/admin/attachment/retry", adminAPI(hAttachmentRetry))
 	mux.HandleFunc("POST /api/admin/attachment/delete", adminAPI(hAttachmentDelete))
 	mux.HandleFunc("GET /api/admin/logs", adminAPI(hAdminLogs))
+	mux.HandleFunc("GET /api/admin/logs/download", adminAPI(hAdminLogsDownload))
+	mux.HandleFunc("GET /api/admin/logs/files", adminAPI(hAdminLogsFiles))
 	mux.HandleFunc("POST /api/admin/logs/clear", adminAPI(hAdminLogsClear))
 
 	return mux
@@ -1081,7 +1085,91 @@ func hRemoveAdmin(w http.ResponseWriter, r *http.Request) {
 
 // hAdminLogs 在线日志（管理面板「运行日志」页签）
 func hAdminLogs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": true, "lines": appLog.Lines(300)})
+	resp := map[string]any{"ok": true, "lines": appLog.Lines(300)}
+	if fileLog != nil {
+		resp["file"] = fileLog.FilePath()
+	}
+	writeJSON(w, 200, resp)
+}
+
+// hAdminLogsDownload 下载日志文件（默认活动文件 server.log，可指定归档）
+func hAdminLogsDownload(w http.ResponseWriter, r *http.Request) {
+	if fileLog == nil {
+		errJSON(w, 404, "日志文件未启用")
+		return
+	}
+	path := fileLog.FilePath()
+	name := filepath.Base(path)
+
+	// 允许下载同目录下的归档日志（server-YYYY-MM-DD[.n].log），防目录穿越
+	if want := trimSpace(r.URL.Query().Get("file")); want != "" {
+		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		ext := filepath.Ext(path)
+		if filepath.Base(want) != want || !strings.HasPrefix(want, base+"-") || !strings.HasSuffix(want, ext) {
+			errJSON(w, 400, "非法的日志文件名")
+			return
+		}
+		path = filepath.Join(filepath.Dir(fileLog.FilePath()), want)
+		name = want
+	}
+	if !fileExists(path) {
+		errJSON(w, 404, "日志文件不存在")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition",
+		mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	http.ServeFile(w, r, path)
+}
+
+// hAdminLogsFiles 列出可下载的日志文件（活动 + 归档）
+func hAdminLogsFiles(w http.ResponseWriter, r *http.Request) {
+	if fileLog == nil {
+		writeJSON(w, 200, map[string]any{"ok": true, "files": []any{}, "enabled": false})
+		return
+	}
+	path := fileLog.FilePath()
+	dir := filepath.Dir(path)
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	ext := filepath.Ext(path)
+
+	type logFileInfo struct {
+		Name    string `json:"name"`
+		Size    int64  `json:"size"`
+		ModTime string `json:"mod_time"`
+		Active  bool   `json:"active"`
+	}
+	out := []logFileInfo{}
+	add := func(name string) {
+		p := filepath.Join(dir, name)
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() {
+			return
+		}
+		out = append(out, logFileInfo{
+			Name:    name,
+			Size:    st.Size(),
+			ModTime: st.ModTime().Format("2006-01-02 15:04:05"),
+			Active:  name == filepath.Base(path),
+		})
+	}
+	add(filepath.Base(path))
+	entries, _ := os.ReadDir(dir)
+	var archives []string
+	for _, e := range entries {
+		n := e.Name()
+		if !e.IsDir() && n != filepath.Base(path) &&
+			strings.HasPrefix(n, base+"-") && strings.HasSuffix(n, ext) {
+			archives = append(archives, n)
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(archives)))
+	for _, n := range archives {
+		add(n)
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "enabled": true, "path": path, "files": out,
+	})
 }
 
 func hAdminLogsClear(w http.ResponseWriter, r *http.Request) {

@@ -21,7 +21,8 @@
 | 附件路径 | 上传文件名经 `sanitizeFileName` 消毒（去目录分隔符与危险字符），本地仅存于 `uploads_dir`；下载强制 `Content-Disposition: attachment`（`mime.FormatMediaType` 转义） |
 | 附件鉴权 | 上传/列表/下载/重试/删除均校验「本人或管理员」，越权返回 403；附件大小受 `max_upload_mb` 与 `MaxBytesReader` 双重限制 |
 | 依赖 CVE | `go-sql-driver/mysql v1.10.1`、React 18.3.1、`filippo.io/edwards25519 v1.2.0` 均无已知高危漏洞 |
-| 日志接口权限 | `/api/admin/logs` 仅管理员可访问 |
+| 日志接口权限 | `/api/admin/logs`、`/api/admin/logs/files`、`/api/admin/logs/download` 仅管理员可访问 |
+| 日志文件下载 | 文件名严格校验（`filepath.Base(want) != want` + 前缀/后缀匹配），拒绝目录穿越与任意文件读取 |
 
 ## 三、审计发现并已修复（发布前 P0）
 
@@ -51,6 +52,7 @@
 6. **附件下载令牌走 URL**：附件下载链接以 `?token=` 携带登录令牌（浏览器直接下载无法带自定义请求头），令牌可能进入浏览器历史或前置代理日志。建议附件内容不涉密，或在反向代理上关闭访问日志记录。
 7. **附件默认存于钉盘/上传人空间**：`drive_space_id` 留空时会用上传人自己的钉盘空间兜底，企业数据可能分散到个人空间。生产环境建议在 `config.json` 指定统一的企业自定义空间 ID。
 8. **上传内容读入内存**：单个附件会完整读入内存后再落盘/转发钉盘，`max_upload_mb` 默认 20MB 时内存占用可控，但并发大附件上传会抬高内存峰值；如需上传大文件请调低上限或前置限流。
+9. **日志含个人信息且默认落盘**：服务日志会记录钉钉 `userid`、姓名、部门，并写入 `logs/server.log`（默认保留 30 天，可在管理面板下载）。请按公司隐私要求设置 `log_retain_days` 与日志留存周期，并把日志目录权限收紧。
 
 ## 五、报告漏洞
 

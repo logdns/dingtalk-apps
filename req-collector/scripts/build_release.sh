@@ -13,6 +13,26 @@ cd "$(dirname "$0")/.."
 VERSION="${1:-$(grep -m1 'AppVersion' config.go | sed -E 's/.*"([0-9.]+)".*/\1/')}"
 echo "==> 版本: $VERSION"
 
+# 0) Windows 批处理必须 CRLF，否则 cmd.exe 解析错乱（双击一闪而过）
+echo "==> 校验 Windows 脚本换行符"
+for f in deploy/*.bat; do
+  if ! grep -qU $'\r' "$f"; then
+    echo "    修正 LF -> CRLF: $f"
+    perl -pi -e 's/\r?\n/\r\n/' "$f"
+  fi
+done
+# PowerShell 脚本：必须 CRLF，且 UTF-8 带 BOM（PowerShell 5.1 靠 BOM 识别中文）
+for f in deploy/*.ps1; do
+  if ! grep -qU $'\r' "$f"; then
+    echo "    修正 LF -> CRLF: $f"
+    perl -pi -e 's/\r?\n/\r\n/' "$f"
+  fi
+  if ! head -c 3 "$f" | grep -q $'\xEF\xBB\xBF'; then
+    echo "    补充 UTF-8 BOM: $f"
+    printf '\xEF\xBB\xBF' | cat - "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  fi
+done
+
 # 1) 前端 JSX 预编译
 echo "==> 编译前端 src/*.jsx -> static/*.js"
 if command -v node >/dev/null 2>&1; then
@@ -46,6 +66,12 @@ build_one() {
   cp README.md "dist/build/$PKG_NAME/"
   cp -r deploy "dist/build/$PKG_NAME/"
   if [ "$goos" = "windows" ]; then
+    # 根目录再放一份启动脚本，方便直接双击（deploy/ 里也保留）
+    cp deploy/start-windows.bat "dist/build/$PKG_NAME/start.bat"
+    # 批处理换行符保险（避免打包工具/编辑器把 CRLF 改回 LF）
+    for b in "dist/build/$PKG_NAME"/*.bat "dist/build/$PKG_NAME"/deploy/*.bat; do
+      [ -f "$b" ] && perl -pi -e 's/\r?\n/\r\n/' "$b"
+    done
     (cd dist/build && zip -qr "../${pkg}.zip" "$PKG_NAME")
   else
     (cd dist/build && tar czf "../${pkg}.tar.gz" "$PKG_NAME")

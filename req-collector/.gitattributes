@@ -1,0 +1,13 @@
+# Windows 批处理必须 CRLF，否则 cmd.exe 解析错乱（表现为双击一闪而过）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# PowerShell 脚本 CRLF；中文注释依赖 UTF-8 BOM（见 build_release.sh 保障）
+*.ps1 text eol=crlf
+# Unix 脚本保持 LF
+*.sh  text eol=lf
+# 二进制/资源不做换行转换
+*.exe binary
+*.zip binary
+*.tar.gz binary
+*.png binary
+*.ico binary

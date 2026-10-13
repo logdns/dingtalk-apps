@@ -9,8 +9,9 @@ config.json
 *.exe
 *.log
 
-# 附件本地留档目录（运行时生成，不入库）
-/uploads/
+# 运行期数据
+/logs/
+uploads/
 
 # 系统/编辑器
 .DS_Store

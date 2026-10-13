@@ -4,7 +4,7 @@
 
 **单二进制部署**：前端（React 18 + Arco Design）已编译并 `embed` 进可执行文件，目标机器只需「1 个二进制 + 1 个 config.json」，不需要 Node、不需要额外的静态资源目录。
 
-- 版本：1.1.0
+- 版本：1.2.0
 - 依赖：仅 MySQL 5.7+ / 8.0（数据表自动创建）
 - 平台：Linux amd64/arm64、macOS arm64、Windows amd64
 - 许可：MIT
@@ -98,6 +98,9 @@ go build -o dingtalk-req-collector .          # 或 ./scripts/build_release.sh �
 | `uploads_dir` | 附件本地保存目录（相对二进制工作目录） | `uploads` |
 | `drive_space_id` | 钉盘空间 ID（留空 = 自动用上传人自己的钉盘空间） | — |
 | `max_upload_mb` | 单个附件上限（MB，默认 20，最大 100） | `20` |
+| `log_dir` | 日志目录（相对二进制工作目录） | `logs` |
+| `log_max_mb` | 单个日志文件上限（MB），超出则轮转 | `20` |
+| `log_retain_days` | 归档日志保留天数，过期自动删除 | `30` |
 | `options.departments` | 部门下拉项；留空则用默认值，钉钉免登时会自动带出真实部门 | — |
 | `options.req_types` | 需求类型下拉项 | — |
 | `options.urgencies` | 紧急程度下拉项 | — |
@@ -124,9 +127,11 @@ sudo systemctl status dingtalk-req-collector
 
 1. 解压发布包到固定目录（如 `C:\dingtalk-req\`）。
 2. 编辑同目录 `config.json`（记事本即可）。
-3. 双击 `start-windows.bat` 启动（比直接双击 exe 好：报错时窗口不会一闪而过）。
-4. 开机自启：运行 `deploy\install-autostart.bat`（在当前用户「启动」文件夹放快捷方式，登录后自动运行）；
+3. 双击 `start.bat` 启动（比直接双击 exe 好：报错时窗口不会一闪而过）。
+4. 开机自启：双击 `deploy\install-autostart.bat`（在当前用户「启动」文件夹放快捷方式，登录后自动运行）；
+   双击 `deploy\check-autostart.bat` 可自检自启状态/端口/最近日志；
    需要未登录也运行、或崩溃自动拉起，改用任务计划程序 / NSSM；卸载用 `deploy\uninstall-autostart.bat`。
+   > 自启脚本由 `.bat`（薄包装）+ `.ps1`（实际逻辑）组成；`.bat` 必须 CRLF 换行、`.ps1` 必须 UTF-8 带 BOM，否则 Windows 下会报错或双击一闪而过。构建脚本已自动保障，手工改动后请勿破坏换行/编码。
 5. 放行防火墙（管理员 CMD）：
    ```bat
    netsh advfirewall firewall add rule name="dingtalk-req" dir=in action=allow protocol=TCP localport=1450
@@ -151,6 +156,7 @@ req-collector/
 ├── attachment.go  # 附件：本地留档 + 钉盘上传/下载（OSS 带签直传）
 ├── handlers.go    # 全部 HTTP 路由与页面模板（embed 前端资源）
 ├── logring.go     # 环形日志缓冲（管理面板「运行日志」页签）
+├── logfile.go     # 日志落盘：按天/按大小轮转 + 过期清理
 ├── src/           # 前端源码（JSX，唯一真源）
 │   ├── form.jsx   #   填写页
 │   ├── list.jsx   #   需求列表页
@@ -212,8 +218,10 @@ export GOPROXY=https://goproxy.cn,direct   # 国内代理（首次）
 | GET | `/api/admin/dd_users?name=关键字` | 管理员 | 懒加载搜索钉钉通讯录（缓存 10 分钟） |
 | POST | `/api/admin/attachment/retry` | 管理员 | 把「仅本地」的附件重新推送到钉盘 |
 | POST | `/api/admin/attachment/delete` | 管理员 | 删除附件记录（清理本地文件） |
-| GET | `/api/admin/logs` | 管理员 | 最近 300 行服务日志 |
-| POST | `/api/admin/logs/clear` | 管理员 | 清空日志缓冲 |
+| GET | `/api/admin/logs` | 管理员 | 最近 300 行内存日志缓冲 + 日志文件路径 |
+| GET | `/api/admin/logs/files` | 管理员 | 列出活动 + 归档日志文件 |
+| GET | `/api/admin/logs/download?file=` | 管理员 | 下载日志文件（默认活动文件，可指定归档） |
+| POST | `/api/admin/logs/clear` | 管理员 | 清空内存日志缓冲（不影响磁盘文件） |
 
 需要登录的接口通过 `X-Auth-Token` 请求头携带令牌。
 
@@ -225,6 +233,10 @@ export GOPROXY=https://goproxy.cn,direct   # 国内代理（首次）
 - `app_sessions`：登录令牌（默认 30 天过期）
 - `req_files`：需求附件（文件名/大小/本地路径/钉盘 spaceId+fileId/上传状态）
 
+> 服务日志同时输出到：控制台、内存环形缓冲（管理面板「运行日志」页签，最近 2000 行）、磁盘文件 `logs/server.log`。
+> 磁盘日志跨天或超过 `log_max_mb` 时轮转为 `server-YYYY-MM-DD.log`，超 `log_retain_days` 的归档自动删除；
+> 管理面板可直接列出并下载这些文件。
+
 ## 八、安全
 
 发布前已完成代码审计并修复高危项（随机初始密码、登录限流、越权、模板注入、错误信息泄露等），
@@ -232,6 +244,11 @@ export GOPROXY=https://goproxy.cn,direct   # 国内代理（首次）
 
 ## 九、版本记录（CHANGELOG）
 
+- **v1.2.0**
+  - **日志落盘**：新增 `logfile.go`，日志写入 `logs/server.log`，跨天或超 `log_max_mb` 轮转为 `server-YYYY-MM-DD.log`，超 `log_retain_days` 的归档自动清理；配置缺失、数据库连不上等启动早期错误也会落盘，便于事后排查。
+  - **管理面板查看/下载日志文件**：新增 `/api/admin/logs/files`、`/api/admin/logs/download`，面板「运行日志」页签可查看日志路径、选择归档并一键下载；下载接口严格校验文件名（防目录穿越）。
+  - **Windows 脚本修复**：`.bat` 统一 CRLF、`.ps1` 统一 UTF-8 带 BOM（PowerShell 5.1 靠 BOM 识别中文），自启逻辑重写为 `.ps1` + `.bat` 薄包装，修复双击一闪而过/自启安装失败；新增 `deploy/check-autostart.bat` 一键自检（自启项/快捷方式指向/端口 1450/最近日志）；构建脚本自动修正换行与 BOM。
+  - 新配置项：`log_dir` / `log_max_mb` / `log_retain_days`。
 - **v1.1.0**
   - **新增附件上传**：填写页支持添加附件（默认 20MB/个、最多 5 个，可配 `max_upload_mb`），提交成功后自动上传——本地留档 + 推送钉钉网盘（钉盘）；权限未开通时自动降级为仅本地保存并写日志提示。
   - **管理员后台查看附件**：管理面板与需求列表新增「📎 附件」列，弹窗查看文件名/大小/上传人/钉盘状态并可下载（本人可看自己需求的附件）。
@@ -247,6 +264,8 @@ export GOPROXY=https://goproxy.cn,direct   # 国内代理（首次）
 - **日志显示已通知但员工没收到**：程序在发送后会回查钉钉投递结果，失败/无效用户会记在日志里。最常见原因是 `userid` 不对，或员工不在该应用的可见范围。
 - **部门没有自动带出**：免登时若未取到部门，会以通讯录缓存兜底回填；老会话在下次请求 `/api/me` 时自动补。
 - **附件显示「仅服务器本地」/「同步钉盘中」**：说明钉盘权限未开通或上传尚在后台进行。到钉钉开发者后台开通「企业存储」相关权限点后，可在管理面板附件弹窗点「同步钉盘」补推；本地副本已就绪时功能不受影响。
+- **日志在哪里 / 怎么排查**：控制台与 `logs/server.log` 都有；管理面板「运行日志」页签可在线看、下载。若目录被改，看 `config.json` 的 `log_dir`。
+- **Windows 双击脚本一闪而过**：确认用发布包内的脚本（`.bat` 为 CRLF、`.ps1` 为 UTF-8 BOM）；先双击 `deploy\check-autostart.bat` 看诊断。
 
 ## License
 
