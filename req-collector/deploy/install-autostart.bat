@@ -20,10 +20,10 @@ echo Folder : Startup
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ws=(New-Object -ComObject WScript.Shell);" ^
   "$p=[Environment]::GetFolderPath('Startup');" ^
-  "$s=$ws.CreateShortcut($p + '\KingdeeReqServer.lnk');" ^
+  "$s=$ws.CreateShortcut($p + '\DingTalkReqCollector.lnk');" ^
   "$s.TargetPath='%STARTFILE%';" ^
   "$s.WorkingDirectory='%APPDIR%';" ^
-  "$s.Description='Kingdee Requirement Collector';" ^
+  "$s.Description='DingTalk Requirement Collector';" ^
   "$s.WindowStyle=7;" ^
   "$s.Save()"
 

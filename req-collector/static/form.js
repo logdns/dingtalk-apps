@@ -19,7 +19,9 @@ const {
   Grid,
   Alert,
   Space,
-  Tag
+  Tag,
+  Upload,
+  Spin
 } = window.arco;
 const FormItem = Form.Item;
 const TextArea = Input.TextArea;
@@ -27,6 +29,8 @@ const BASE_DEPARTMENTS = window.APP_CONFIG.departments;
 const REQ_TYPES = window.APP_CONFIG.req_types;
 const URGENCIES = window.APP_CONFIG.urgencies;
 const BILLS = window.APP_CONFIG.bills;
+const MAX_FILE_MB = 20;
+const MAX_FILE_COUNT = 5;
 const STATUS_TEXT = {
   unknown: "正在检查登录状态…",
   logging: "正在钉钉免登…",
@@ -41,6 +45,8 @@ function App() {
   const [authState, setAuthState] = useState(window.WBAuth.state);
   const [deptOptions, setDeptOptions] = useState(BASE_DEPARTMENTS);
   const [showDiag, setShowDiag] = useState(false);
+  const [fileList, setFileList] = useState([]); // 待上传附件
+  const [uploadTip, setUploadTip] = useState(""); // 上传进度提示
 
   // 订阅鉴权状态变化
   useEffect(() => {
@@ -74,16 +80,72 @@ function App() {
     if (me.name) patch.requester = me.name;
     if (Object.keys(patch).length) form.setFieldsValue(patch);
   }, [me]);
+
+  // 选择附件：校验大小与数量
+  const onFilesChange = fl => {
+    const kept = [],
+      tooBig = [];
+    for (const f of fl) {
+      const raw = f.file || f.originFile;
+      if (raw && raw.size > MAX_FILE_MB * 1024 * 1024) {
+        tooBig.push(f.name || raw && raw.name);
+        continue;
+      }
+      kept.push(f);
+    }
+    if (tooBig.length) Message.error("单个附件不超过 " + MAX_FILE_MB + "MB，已忽略：" + tooBig.join("、"));
+    if (kept.length > MAX_FILE_COUNT) {
+      Message.error("最多 " + MAX_FILE_COUNT + " 个附件");
+      kept.length = MAX_FILE_COUNT;
+    }
+    setFileList(kept);
+  };
+
+  // 提交成功后把附件逐个传到服务端（本地留档 + 后台推送钉钉网盘）
+  const uploadAttachments = async reqId => {
+    let ok = 0,
+      failed = [];
+    const list = fileList.filter(it => it.file || it.originFile);
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      const raw = item.file || item.originFile;
+      const label = i + 1 + "/" + list.length;
+      setUploadTip(list.length > 1 ? "正在上传附件 " + label + "…" : "正在上传附件…");
+      try {
+        const d = await window.WBAuth.uploadFile(reqId, raw, 60000);
+        if (d.ok) ok++;else failed.push((item.name || raw.name) + "：" + (d.error || "未知错误"));
+      } catch (e) {
+        failed.push((item.name || raw.name) + "：网络异常");
+      }
+    }
+    setUploadTip("");
+    return {
+      ok,
+      failed
+    };
+  };
   const onSubmit = async values => {
     setLoading(true);
     try {
       const data = await window.WBAuth.api("/api/submit", {
         method: "POST",
-        body: JSON.stringify(values)
+        body: JSON.stringify(Object.assign({}, values, {
+          attachment_count: fileList.length
+        }))
       });
       if (data.ok) {
-        Message.success("提交成功，感谢反馈！可继续填写下一条需求");
+        let msg = "提交成功，感谢反馈！可继续填写下一条需求";
+        if (fileList.length) {
+          const r = await uploadAttachments(data.id);
+          if (r.failed.length) {
+            Message.warning("需求已提交，但有 " + r.failed.length + " 个附件上传失败：" + r.failed.join("；"), 6000);
+          } else if (r.ok) {
+            msg += "，" + r.ok + " 个附件已保存（后台同步到钉钉网盘）";
+          }
+        }
+        Message.success(msg);
         form.resetFields();
+        setFileList([]);
         form.setFieldsValue({
           urgency: "中",
           department: me && me.department ? me.department : BASE_DEPARTMENTS[0],
@@ -285,7 +347,25 @@ function App() {
   }, /*#__PURE__*/React.createElement(Input, {
     placeholder: "关联单据、依赖条件等补充信息（选填）",
     maxLength: 500
-  })), /*#__PURE__*/React.createElement(Button, {
+  })), /*#__PURE__*/React.createElement(FormItem, {
+    label: /*#__PURE__*/React.createElement("span", null, "附件（选填，最多 ", MAX_FILE_COUNT, " 个 / 单个不超过 ", MAX_FILE_MB, "MB，提交后自动上传到钉钉网盘）")
+  }, /*#__PURE__*/React.createElement(Upload, {
+    autoUpload: false,
+    multiple: true,
+    showUploadList: true,
+    fileList: fileList,
+    onChange: onFilesChange,
+    tip: "支持图片 / PDF / Word / Excel / 压缩包等常见格式"
+  })), uploadTip ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement(Typography.Text, {
+    type: "secondary"
+  }, /*#__PURE__*/React.createElement(Spin, {
+    size: 14
+  }), " ", uploadTip)) : null, /*#__PURE__*/React.createElement(Button, {
     type: "primary",
     htmlType: "submit",
     long: true,

@@ -213,6 +213,43 @@
     });
   }
 
+  /* ---------- 附件辅助 ---------- */
+  function formatSize(n) {
+    if (n == null) return "";
+    if (n < 1024) return n + "B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + "KB";
+    return (n / 1048576).toFixed(2) + "MB";
+  }
+  function downloadURL(id) {
+    return "/api/attachment/download?id=" + id + "&token=" + encodeURIComponent(getToken());
+  }
+  /* 上传附件（multipart，专用封装：不能手动设置 Content-Type）
+     带超时保护，避免钉钉 webview 里请求悬停导致页面一直转圈 */
+  function uploadFile(reqId, file, timeoutMs) {
+    var fd = new FormData();
+    fd.append("req_id", reqId);
+    fd.append("file", file);
+    var ctl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = null;
+    var req = fetch("/api/attachment/upload", {
+      method: "POST",
+      headers: { "X-Auth-Token": getToken() },
+      body: fd,
+      credentials: "same-origin",
+      signal: ctl ? ctl.signal : undefined
+    }).then(function (r) {
+      if (timer) clearTimeout(timer);
+      return r.json().catch(function () { return {}; });
+    });
+    if (ctl) {
+      timer = setTimeout(function () { ctl.abort(); }, timeoutMs || 60000);
+    }
+    return req.catch(function (e) {
+      if (timer) clearTimeout(timer);
+      return { ok: false, error: "上传超时或网络中断（文件可能已上传，请到管理面板确认）" };
+    });
+  }
+
   global.WBAuth = {
     api: api,
     ensureLogin: ensureLogin,
@@ -225,6 +262,9 @@
     subscribe: subscribe,
     state: state,
     setState: setState,
-    errText: errText
+    errText: errText,
+    formatSize: formatSize,
+    downloadURL: downloadURL,
+    uploadFile: uploadFile
   };
 })(window);

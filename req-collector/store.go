@@ -67,6 +67,22 @@ func migrate() error {
 			v TEXT NOT NULL,
 			PRIMARY KEY (k)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS req_files (
+			id INT NOT NULL AUTO_INCREMENT,
+			req_id INT NOT NULL,
+			file_name VARCHAR(255) NOT NULL,
+			file_size BIGINT NOT NULL DEFAULT 0,
+			local_path VARCHAR(500) DEFAULT '',
+			drive_space_id VARCHAR(64) DEFAULT '',
+			drive_file_id VARCHAR(64) DEFAULT '',
+			drive_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+			drive_message VARCHAR(500) DEFAULT '',
+			uploaded_by VARCHAR(64) DEFAULT '',
+			uploaded_by_name VARCHAR(50) DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			KEY idx_req_files_req (req_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 		`CREATE TABLE IF NOT EXISTS app_sessions (
 			token VARCHAR(64) NOT NULL,
 			userid VARCHAR(64) DEFAULT NULL,
@@ -83,6 +99,8 @@ func migrate() error {
 			return fmt.Errorf("建表失败: %w", err)
 		}
 	}
+	// 老库平滑升级：附件记录新增失败原因字段
+	ensureColumn("req_files", "drive_message", "VARCHAR(500) DEFAULT ''")
 	// 管理面板密码初始化/兼容
 	return initAdminPassword()
 }
@@ -285,4 +303,87 @@ func rowOwnerOrAdmin(r *http.Request, rid int) (string, bool, bool) {
 		return username.String, false, true
 	}
 	return "", false, false
+}
+
+// ---------- 需求附件 ----------
+
+type ReqFile struct {
+	ID             int    `json:"id"`
+	ReqID          int    `json:"req_id"`
+	FileName       string `json:"file_name"`
+	FileSize       int64  `json:"file_size"`
+	LocalPath      string `json:"-"`
+	DriveSpaceID   string `json:"-"`
+	DriveFileID    string `json:"-"`
+	DriveStatus    string `json:"drive_status"`
+	UploadedBy     string `json:"uploaded_by"`
+	UploadedByName string `json:"uploaded_by_name"`
+	CreatedAt      string `json:"created_at"`
+	// 前端展示用：本地副本是否缺失、是否可从钉盘/本地取到
+	LocalMissing bool `json:"local_missing"`
+	Available    bool `json:"available"`
+}
+
+func listFilesByReq(reqID int) []ReqFile {
+	rows, err := db.Query(
+		`SELECT id, req_id, file_name, file_size, local_path, drive_space_id, drive_file_id,
+		        drive_status, uploaded_by, uploaded_by_name, created_at
+		 FROM req_files WHERE req_id=? ORDER BY id`, reqID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []ReqFile
+	for rows.Next() {
+		var f ReqFile
+		var lp, ds, df, ub sql.NullString
+		var createdAt time.Time
+		if err := rows.Scan(&f.ID, &f.ReqID, &f.FileName, &f.FileSize, &lp, &ds, &df,
+			&f.DriveStatus, &ub, &f.UploadedByName, &createdAt); err != nil {
+			continue
+		}
+		f.LocalPath, f.DriveSpaceID, f.DriveFileID, f.UploadedBy = lp.String, ds.String, df.String, ub.String
+		f.CreatedAt = createdAt.Format("2006-01-02 15:04")
+		f.LocalMissing = f.LocalPath == "" || !fileExists(f.LocalPath)
+		f.Available = !f.LocalMissing || (f.DriveSpaceID != "" && f.DriveFileID != "")
+		out = append(out, f)
+	}
+	return out
+}
+
+func fileByID(fid int) *ReqFile {
+	var f ReqFile
+	var lp, ds, df, ub sql.NullString
+	var createdAt time.Time
+	err := db.QueryRow(
+		`SELECT id, req_id, file_name, file_size, local_path, drive_space_id, drive_file_id,
+		        drive_status, uploaded_by, uploaded_by_name, created_at
+		 FROM req_files WHERE id=?`, fid).
+		Scan(&f.ID, &f.ReqID, &f.FileName, &f.FileSize, &lp, &ds, &df,
+			&f.DriveStatus, &ub, &f.UploadedByName, &createdAt)
+	if err != nil {
+		return nil
+	}
+	f.LocalPath, f.DriveSpaceID, f.DriveFileID, f.UploadedBy = lp.String, ds.String, df.String, ub.String
+	f.CreatedAt = createdAt.Format("2006-01-02 15:04")
+	f.LocalMissing = f.LocalPath == "" || !fileExists(f.LocalPath)
+	f.Available = !f.LocalMissing || (f.DriveSpaceID != "" && f.DriveFileID != "")
+	return &f
+}
+
+func updateFileDriveStatus(fid int, status, spaceID, fileID, message string) {
+	_, _ = db.Exec("UPDATE req_files SET drive_status=?, drive_space_id=?, drive_file_id=?, drive_message=? WHERE id=?",
+		status, spaceID, fileID, message, fid)
+}
+
+// ensureColumn 老库平滑升级：列不存在时自动补上
+func ensureColumn(table, column, ddl string) {
+	var cnt int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?`, table, column).Scan(&cnt)
+	if cnt == 0 {
+		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, ddl)); err == nil {
+			log.Printf("已为表 %s 补充列 %s", table, column)
+		}
+	}
 }

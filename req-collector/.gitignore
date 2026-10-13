@@ -3,11 +3,14 @@
 config.json
 
 # 编译产物
-/kingdee-req-server
-/kingdee-req-server.exe
+/dingtalk-req-collector
+/dingtalk-req-collector.exe
 /dist/
 *.exe
 *.log
+
+# 附件本地留档目录（运行时生成，不入库）
+/uploads/
 
 # 系统/编辑器
 .DS_Store

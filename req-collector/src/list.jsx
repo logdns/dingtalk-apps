@@ -19,6 +19,9 @@ function App() {
   const [authState, setAuthState] = useState(window.WBAuth.state);
   const [editing, setEditing] = useState(null);
   const [editForm] = Form.useForm();
+  const [attFiles, setAttFiles] = useState(null);   // 附件弹窗数据
+  const [attReqId, setAttReqId] = useState(null);
+  const [attLoading, setAttLoading] = useState(false);
 
   useEffect(() => {
     return window.WBAuth.subscribe(function (s) { setAuthState(Object.assign({}, s)); });
@@ -74,6 +77,16 @@ function App() {
   const isMine = (r) => !!(me.userid && r.username === me.userid);
   const canManage = (r) => me.is_admin || isMine(r);
 
+  const openAttachments = async (record) => {
+    setAttReqId(record.id); setAttFiles([]); setAttLoading(true);
+    try {
+      const data = await window.WBAuth.api("/api/requirements/attachments?req_id=" + record.id);
+      if (data.ok) setAttFiles(data.files || []);
+      else Message.error(data.error || "附件加载失败");
+    } catch (e) { Message.error("网络异常：" + e.message); }
+    setAttLoading(false);
+  };
+
   const feasibilityCol = me.is_admin
     ? { title: "能否实现", dataIndex: "feasibility", width: 130,
         render: (v, r) => (
@@ -101,6 +114,10 @@ function App() {
       render: v => <Tag color={URGENCY_COLOR[v] || "gray"}>{v}</Tag> },
     feasibilityCol,
     { title: "备注", dataIndex: "remark", width: 140, render: v => v || "-" },
+    { title: "附件", dataIndex: "_att", width: 90, fixed: "right",
+      render: (v, r) => canManage(r)
+        ? <Button size="mini" onClick={() => openAttachments(r)}>📎 查看</Button>
+        : <Typography.Text type="secondary">-</Typography.Text> },
   ];
 
   if (me.is_admin || me.logged) {
@@ -204,6 +221,36 @@ function App() {
             <Input maxLength={500} />
           </FormItem>
         </Form>
+      </Modal>
+
+      <Modal title={"📎 附件 - 需求 #" + (attReqId || "")}
+             visible={attFiles !== null}
+             onCancel={() => setAttFiles(null)}
+             footer={null} style={{ width: 520 }}>
+        {attLoading ? <Typography.Text>加载中…</Typography.Text> : (
+          attFiles && attFiles.length ? (
+            <div>
+              {attFiles.map(f => (
+                <div key={f.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                                          padding: "8px 0", borderBottom: "1px solid #f0f1f2" }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontWeight: 500, wordBreak: "break-all" }}>{f.file_name}</div>
+                    <div style={{ fontSize: 12, color: "#86909c" }}>
+                      {window.WBAuth.formatSize(f.file_size)} · {f.uploaded_by_name || "未知"} · {f.created_at}
+                      {f.drive_status === "uploaded" ? " · 已存钉盘"
+                        : f.drive_status === "pending" ? " · 同步钉盘中…"
+                        : f.available === false ? " · ⚠️ 文件已丢失"
+                        : " · 仅服务器本地"}
+                    </div>
+                  </div>
+                  {f.available === false
+                    ? <Tag color="red">已丢失</Tag>
+                    : <Button size="mini" type="primary" href={window.WBAuth.downloadURL(f.id)}>下载</Button>}
+                </div>
+              ))}
+            </div>
+          ) : <Empty description="该需求暂无附件" />
+        )}
       </Modal>
     </div>
   );

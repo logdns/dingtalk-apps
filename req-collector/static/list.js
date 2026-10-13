@@ -52,6 +52,9 @@ function App() {
   const [authState, setAuthState] = useState(window.WBAuth.state);
   const [editing, setEditing] = useState(null);
   const [editForm] = Form.useForm();
+  const [attFiles, setAttFiles] = useState(null); // 附件弹窗数据
+  const [attReqId, setAttReqId] = useState(null);
+  const [attLoading, setAttLoading] = useState(false);
   useEffect(() => {
     return window.WBAuth.subscribe(function (s) {
       setAuthState(Object.assign({}, s));
@@ -129,6 +132,18 @@ function App() {
   // 自己提交的记录：可编辑可删除
   const isMine = r => !!(me.userid && r.username === me.userid);
   const canManage = r => me.is_admin || isMine(r);
+  const openAttachments = async record => {
+    setAttReqId(record.id);
+    setAttFiles([]);
+    setAttLoading(true);
+    try {
+      const data = await window.WBAuth.api("/api/requirements/attachments?req_id=" + record.id);
+      if (data.ok) setAttFiles(data.files || []);else Message.error(data.error || "附件加载失败");
+    } catch (e) {
+      Message.error("网络异常：" + e.message);
+    }
+    setAttLoading(false);
+  };
   const feasibilityCol = me.is_admin ? {
     title: "能否实现",
     dataIndex: "feasibility",
@@ -202,6 +217,17 @@ function App() {
     dataIndex: "remark",
     width: 140,
     render: v => v || "-"
+  }, {
+    title: "附件",
+    dataIndex: "_att",
+    width: 90,
+    fixed: "right",
+    render: (v, r) => canManage(r) ? /*#__PURE__*/React.createElement(Button, {
+      size: "mini",
+      onClick: () => openAttachments(r)
+    }, "📎 查看") : /*#__PURE__*/React.createElement(Typography.Text, {
+      type: "secondary"
+    }, "-")
   }];
   if (me.is_admin || me.logged) {
     columns.push({
@@ -383,6 +409,46 @@ function App() {
     field: "remark"
   }, /*#__PURE__*/React.createElement(Input, {
     maxLength: 500
-  })))));
+  })))), /*#__PURE__*/React.createElement(Modal, {
+    title: "📎 附件 - 需求 #" + (attReqId || ""),
+    visible: attFiles !== null,
+    onCancel: () => setAttFiles(null),
+    footer: null,
+    style: {
+      width: 520
+    }
+  }, attLoading ? /*#__PURE__*/React.createElement(Typography.Text, null, "加载中…") : attFiles && attFiles.length ? /*#__PURE__*/React.createElement("div", null, attFiles.map(f => /*#__PURE__*/React.createElement("div", {
+    key: f.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      padding: "8px 0",
+      borderBottom: "1px solid #f0f1f2"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      minWidth: 0,
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 500,
+      wordBreak: "break-all"
+    }
+  }, f.file_name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "#86909c"
+    }
+  }, window.WBAuth.formatSize(f.file_size), " · ", f.uploaded_by_name || "未知", " · ", f.created_at, f.drive_status === "uploaded" ? " · 已存钉盘" : f.drive_status === "pending" ? " · 同步钉盘中…" : f.available === false ? " · ⚠️ 文件已丢失" : " · 仅服务器本地")), f.available === false ? /*#__PURE__*/React.createElement(Tag, {
+    color: "red"
+  }, "已丢失") : /*#__PURE__*/React.createElement(Button, {
+    size: "mini",
+    type: "primary",
+    href: window.WBAuth.downloadURL(f.id)
+  }, "下载")))) : /*#__PURE__*/React.createElement(Empty, {
+    description: "该需求暂无附件"
+  })));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));

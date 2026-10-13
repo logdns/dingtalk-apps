@@ -5,7 +5,7 @@
 
 ## 一、审计范围与方法
 
-- 范围：`req-collector/` 下全部 Go 源码（main / config / store / handlers / dingtalk / logring）、前端源码 `src/*.jsx` 与编译产物 `static/*.js`、配置与部署脚本。
+- 范围：`req-collector/` 下全部 Go 源码（main / config / store / handlers / dingtalk / attachment / logring）、前端源码 `src/*.jsx` 与编译产物 `static/*.js`、配置与部署脚本。
 - 方法：人工通读 + 正则全量检索（SQL 拼接点、鉴权入口、innerHTML/eval、日志打印点、凭据与随机数用法、依赖版本 CVE）。
 
 ## 二、已通过（无风险）
@@ -18,6 +18,8 @@
 | `app_secret` 泄露 | 从不写入日志，也不通过任何接口返回；公开接口只返回 `corpId` / `clientId` / `agentId` |
 | CSRF | 令牌存 localStorage 并以 `X-Auth-Token` 头发送，不使用 Cookie；写操作均为 `application/json`，未开放 CORS |
 | 静态资源 | 使用 `embed.FS` 只读文件系统，无路径穿越 |
+| 附件路径 | 上传文件名经 `sanitizeFileName` 消毒（去目录分隔符与危险字符），本地仅存于 `uploads_dir`；下载强制 `Content-Disposition: attachment`（`mime.FormatMediaType` 转义） |
+| 附件鉴权 | 上传/列表/下载/重试/删除均校验「本人或管理员」，越权返回 403；附件大小受 `max_upload_mb` 与 `MaxBytesReader` 双重限制 |
 | 依赖 CVE | `go-sql-driver/mysql v1.10.1`、React 18.3.1、`filippo.io/edwards25519 v1.2.0` 均无已知高危漏洞 |
 | 日志接口权限 | `/api/admin/logs` 仅管理员可访问 |
 
@@ -46,6 +48,9 @@
 3. **需求列表默认公开**：`/api/requirements` 不要求登录（设计为"内网任何人可看列表"）。若需求内容敏感，可在前置代理上限制来源，或自行改为需要登录态。
 4. **日志含个人信息**：日志会记录钉钉 `userid`、姓名、部门，用于排查问题。请按公司隐私要求设置日志留存周期。
 5. **无操作审计**：暂未记录"谁在何时改/删了哪条需求"，多人共用管理员账号时无法追溯，建议一人一账号（钉钉身份 + 面板管理员授权）。
+6. **附件下载令牌走 URL**：附件下载链接以 `?token=` 携带登录令牌（浏览器直接下载无法带自定义请求头），令牌可能进入浏览器历史或前置代理日志。建议附件内容不涉密，或在反向代理上关闭访问日志记录。
+7. **附件默认存于钉盘/上传人空间**：`drive_space_id` 留空时会用上传人自己的钉盘空间兜底，企业数据可能分散到个人空间。生产环境建议在 `config.json` 指定统一的企业自定义空间 ID。
+8. **上传内容读入内存**：单个附件会完整读入内存后再落盘/转发钉盘，`max_upload_mb` 默认 20MB 时内存占用可控，但并发大附件上传会抬高内存峰值；如需上传大文件请调低上限或前置限流。
 
 ## 五、报告漏洞
 

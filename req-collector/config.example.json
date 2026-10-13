@@ -18,6 +18,9 @@
   },
   "admin_password": "改成管理面板初始密码",
   "session_days": 30,
+  "uploads_dir": "uploads",
+  "drive_space_id": "",
+  "max_upload_mb": 20,
   "options": {
     "departments": ["研发部", "产品部", "销售部", "财务部", "人事部", "其他"],
     "req_types": ["功能需求", "字段需求", "报表需求", "流程优化", "接口集成", "其他"],

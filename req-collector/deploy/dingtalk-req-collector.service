@@ -1,5 +1,5 @@
 [Unit]
-Description=Kingdee Requirement Collector (Go)
+Description=DingTalk Requirement Collector (Go)
 After=network.target mysql.service
 
 [Service]

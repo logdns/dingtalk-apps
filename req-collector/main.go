@@ -50,6 +50,9 @@ const configTemplate = `{
   },
   "admin_password": "改成管理面板初始密码",
   "session_days": 30,
+  "uploads_dir": "uploads",
+  "drive_space_id": "",
+  "max_upload_mb": 20,
   "options": {
     "departments": ["研发部", "产品部", "销售部", "财务部", "人事部", "其他"],
     "req_types": ["功能需求", "字段需求", "报表需求", "流程优化", "接口集成", "其他"],
@@ -110,9 +113,11 @@ func main() {
 }
 
 // limitBody 限制请求体大小（防超大 body 打爆内存）
+// 注意：附件上传走 multipart，单个附件上限由 max_upload_mb 控制，
+// 该路由在 handler 内自行用 MaxBytesReader 限制，不能套用全局 1MB 限制。
 func limitBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil {
+		if r.Body != nil && r.URL.Path != "/api/attachment/upload" {
 			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
 		}
 		next.ServeHTTP(w, r)

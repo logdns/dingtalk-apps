@@ -438,6 +438,10 @@ func notifyAdminsNewRequirement(info map[string]string) {
 		}
 		rows.Close()
 		base := strings.TrimRight(baseURL, "/")
+		attLine := ""
+		if n := info["attachments"]; n != "" && n != "0" {
+			attLine = fmt.Sprintf("\n\n**附件**：📎 %s 个（管理面板可下载）", n)
+		}
 		markdown := fmt.Sprintf(
 			"### 📋 收到新需求\n\n"+
 				"**部　门**：%s\n\n"+
@@ -445,9 +449,9 @@ func notifyAdminsNewRequirement(info map[string]string) {
 				"**需求描述**\n\n%s\n\n"+
 				"---\n\n"+
 				"**单据/类型**：%s（%s）\n\n"+
-				"**紧急程度**：%s %s",
+				"**紧急程度**：%s %s%s",
 			info["department"], info["requester"], info["description"],
-			info["bill_name"], info["req_type"], urgencyEmoji(info["urgency"]), info["urgency"])
+			info["bill_name"], info["req_type"], urgencyEmoji(info["urgency"]), info["urgency"], attLine)
 		var btns [][2]string
 		if base != "" {
 			btns = [][2]string{
@@ -491,7 +495,7 @@ func notifySubmitterFeasibility(ownerUserid, feasibility, description string) {
 				"**需求描述**\n\n%s\n\n"+
 				"---\n\n"+
 				"**能否实现**：%s %s\n\n"+
-				"如对结果有疑问，请联系信息部。",
+				"如对结果有疑问，请联系管理员。",
 			short, feasEmoji, feasibility)
 		var btns [][2]string
 		if base != "" {

@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +22,7 @@ import (
 //go:embed static
 var staticFS embed.FS
 
-const staticVer = "20261012e"
+const staticVer = "20261013a"
 
 // 下拉选项全部来自 config.json 的 options 段，未配置时用通用默认值（见 config.go）
 
@@ -169,6 +173,11 @@ func NewRouter() *http.ServeMux {
 	mux.HandleFunc("GET /api/requirements", hRequirements)
 	mux.HandleFunc("POST /api/feasibility", hFeasibility)
 
+	// 附件
+	mux.HandleFunc("POST /api/attachment/upload", hAttachmentUpload)
+	mux.HandleFunc("GET /api/requirements/attachments", hReqAttachments)
+	mux.HandleFunc("GET /api/attachment/download", hAttachmentDownload)
+
 	// 管理 API
 	mux.HandleFunc("POST /api/admin/login", hAdminLogin)
 	mux.HandleFunc("GET /api/admin/status", hAdminStatus)
@@ -180,6 +189,8 @@ func NewRouter() *http.ServeMux {
 	mux.HandleFunc("POST /api/admin/add_admin", adminAPI(hAddAdmin))
 	mux.HandleFunc("POST /api/admin/remove_admin", adminAPI(hRemoveAdmin))
 	mux.HandleFunc("GET /api/admin/dd_users", adminAPI(hDDUsers))
+	mux.HandleFunc("POST /api/admin/attachment/retry", adminAPI(hAttachmentRetry))
+	mux.HandleFunc("POST /api/admin/attachment/delete", adminAPI(hAttachmentDelete))
 	mux.HandleFunc("GET /api/admin/logs", adminAPI(hAdminLogs))
 	mux.HandleFunc("POST /api/admin/logs/clear", adminAPI(hAdminLogsClear))
 
@@ -373,18 +384,22 @@ func hSubmit(w http.ResponseWriter, r *http.Request) {
 	if ddUser != nil {
 		username = ddUser.UserID
 	}
-	_, err := db.Exec(
+	res, err := db.Exec(
 		"INSERT INTO req_items (department, requester, username, description, scenario, bill_name, req_type, urgency, remark) VALUES (?,?,?,?,?,?,?,?,?)",
 		department, requester, username, description, strTrim(f, "scenario"), billName, reqType, urgency, strTrim(f, "remark"))
 	if err != nil {
 		internalErr(w, "提交需求", err)
 		return
 	}
+	reqID, _ := res.LastInsertId()
+	// 提交时声明了附件数量 → 通知里带上（附件在提交成功后立即上传）
+	attCount, _ := intVal(f, "attachment_count")
 	notifyAdminsNewRequirement(map[string]string{
 		"department": department, "requester": requester, "description": description,
 		"bill_name": billName, "req_type": reqType, "urgency": urgency,
+		"attachments": fmt.Sprint(attCount),
 	})
-	okJSON(w, nil)
+	okJSON(w, map[string]any{"id": reqID})
 }
 
 func hRequirements(w http.ResponseWriter, r *http.Request) {
@@ -478,6 +493,259 @@ func hFeasibility(w http.ResponseWriter, r *http.Request) {
 			notifySubmitterFeasibility(owner.String, feas, description)
 		}
 	}
+	okJSON(w, nil)
+}
+
+// ---- 附件 API ----
+
+// formInt 从表单/查询参数取正整数
+func formInt(v string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// hAttachmentUpload 提交成功后上传附件：本地留档 + 后台异步推送钉盘
+func hAttachmentUpload(w http.ResponseWriter, r *http.Request) {
+	sess := currentUser(r)
+	if sess == nil {
+		errJSON(w, 401, "请先登录")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, int64(cfg.MaxUploadMB+2)<<20)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		errJSON(w, 400, fmt.Sprintf("上传解析失败（单个附件上限 %dMB）", cfg.MaxUploadMB))
+		return
+	}
+	rid, hasID := formInt(r.FormValue("req_id"))
+	if !hasID {
+		errJSON(w, 400, "缺少需求编号")
+		return
+	}
+	_, _, allowed := rowOwnerOrAdmin(r, rid)
+	if !allowed {
+		errJSON(w, 403, "无权限：只能给自己的需求上传附件")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		errJSON(w, 400, "缺少文件")
+		return
+	}
+	defer file.Close()
+	if header.Size > int64(cfg.MaxUploadMB)<<20 {
+		errJSON(w, 400, fmt.Sprintf("「%s」超过 %dMB 上限", header.Filename, cfg.MaxUploadMB))
+		return
+	}
+	content, err := readAllLimited(file, int64(cfg.MaxUploadMB)<<20)
+	if err != nil {
+		errJSON(w, 400, fmt.Sprintf("「%s」超过 %dMB 上限", header.Filename, cfg.MaxUploadMB))
+		return
+	}
+
+	// 1) 本地留档（钉盘推送失败时管理面板仍可下载）
+	localPath, err := saveLocal(rid, header.Filename, content)
+	if err != nil {
+		internalErr(w, "附件保存", err)
+		return
+	}
+
+	// 2) 记录数据库
+	fname := sanitizeFileName(header.Filename)
+	res, err := db.Exec(
+		`INSERT INTO req_files (req_id, file_name, file_size, local_path, drive_status, uploaded_by, uploaded_by_name)
+		 VALUES (?,?,?,?,?,?,?)`,
+		rid, fname, header.Size, localPath, "pending", sess.UserID, sess.Name)
+	if err != nil {
+		internalErr(w, "附件记录", err)
+		return
+	}
+	fid, _ := res.LastInsertId()
+
+	// 3) 先立即响应，钉盘推送放后台异步执行（避免前端长时间等待/卡住）
+	//    本地留档已就绪，管理面板随时可下载；钉盘状态随后更新
+	operator := sess.UserID
+	if operator == "" {
+		_ = db.QueryRow("SELECT IFNULL(username,'') FROM req_items WHERE id=?", rid).Scan(&operator)
+	}
+	log.Printf("附件已接收: 需求 %d ← %s（%d 字节），开始后台推送钉盘", rid, fname, header.Size)
+	okJSON(w, map[string]any{
+		"file_id": int(fid), "file_name": fname, "drive_status": "pending",
+	})
+	if operator != "" {
+		go pushFileToDrive(int(fid), rid, fname, operator, content)
+	} else {
+		updateFileDriveStatus(int(fid), "failed", "", "", "无钉钉操作人身份，跳过钉盘上传")
+	}
+}
+
+// readAllLimited 读取内容并限制大小
+func readAllLimited(f io.Reader, limit int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("too large")
+	}
+	return b, nil
+}
+
+// hReqAttachments 查看某条需求的附件（本人或管理员）
+func hReqAttachments(w http.ResponseWriter, r *http.Request) {
+	rid, hasID := formInt(r.URL.Query().Get("req_id"))
+	if !hasID {
+		errJSON(w, 400, "缺少需求编号")
+		return
+	}
+	_, _, allowed := rowOwnerOrAdmin(r, rid)
+	if !allowed {
+		errJSON(w, 403, "无权限查看该需求的附件")
+		return
+	}
+	files := listFilesByReq(rid)
+	if files == nil {
+		files = []ReqFile{}
+	}
+	okJSON(w, map[string]any{"files": files, "count": len(files)})
+}
+
+// hAttachmentDownload 下载附件：本地存在直接下发，否则走钉盘临时链接代理
+func hAttachmentDownload(w http.ResponseWriter, r *http.Request) {
+	fid, hasID := formInt(r.URL.Query().Get("id"))
+	if !hasID {
+		errJSON(w, 400, "缺少附件编号")
+		return
+	}
+	f := fileByID(fid)
+	if f == nil {
+		errJSON(w, 404, "附件不存在")
+		return
+	}
+	if _, _, allowed := rowOwnerOrAdmin(r, f.ReqID); !allowed {
+		errJSON(w, 403, "无权限下载该附件")
+		return
+	}
+	if f.LocalPath != "" && fileExists(f.LocalPath) {
+		w.Header().Set("Content-Type", localContentType(f.LocalPath))
+		w.Header().Set("Content-Disposition",
+			mime.FormatMediaType("attachment", map[string]string{"filename": f.FileName}))
+		http.ServeFile(w, r, f.LocalPath)
+		return
+	}
+	// 本地缺失 → 钉盘临时下载链接（由管理员/提交人身份换取）
+	operator := ""
+	if s := currentUser(r); s != nil {
+		operator = s.UserID
+	}
+	if operator == "" {
+		operator = f.UploadedBy
+	}
+	if f.DriveSpaceID == "" || f.DriveFileID == "" || operator == "" {
+		errJSON(w, 404, "附件文件已丢失（本地与钉盘均不可用）")
+		return
+	}
+	dlURL, hdrs, err := driveDownloadURL(operator, f.DriveSpaceID, f.DriveFileID)
+	if err != nil {
+		log.Printf("钉盘下载链接获取失败(附件 %d): %v", fid, err)
+		errJSON(w, 502, "获取钉盘下载链接失败，请稍后重试")
+		return
+	}
+	req, err := http.NewRequest("GET", dlURL, nil)
+	if err != nil {
+		errJSON(w, 500, "下载请求构建失败")
+		return
+	}
+	for k, v := range hdrs {
+		req.Header.Set(k, v)
+	}
+	resp, err := driveClient.Do(req)
+	if err != nil {
+		log.Printf("从钉盘下载失败(附件 %d): %v", fid, err)
+		errJSON(w, 502, "从钉盘下载失败，请稍后重试")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		io.Copy(io.Discard, resp.Body)
+		errJSON(w, 502, fmt.Sprintf("从钉盘下载失败: HTTP %d", resp.StatusCode))
+		return
+	}
+	w.Header().Set("Content-Type", localContentType(f.FileName))
+	w.Header().Set("Content-Disposition",
+		mime.FormatMediaType("attachment", map[string]string{"filename": f.FileName}))
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// hAttachmentRetry 管理员：把「仅本地」的附件重新推送到钉盘（权限补齐后补救用）
+func hAttachmentRetry(w http.ResponseWriter, r *http.Request) {
+	fid, hasID := intVal(readJSON(r), "id")
+	if !hasID {
+		if v, ok := formInt(r.URL.Query().Get("id")); ok && v > 0 {
+			fid, hasID = v, true
+		}
+	}
+	if !hasID || fid <= 0 {
+		errJSON(w, 400, "缺少附件编号")
+		return
+	}
+	f := fileByID(fid)
+	if f == nil {
+		errJSON(w, 404, "附件不存在")
+		return
+	}
+	if f.DriveStatus == "uploaded" {
+		errJSON(w, 400, "该附件已在钉盘中，无需同步")
+		return
+	}
+	if f.LocalPath == "" || !fileExists(f.LocalPath) {
+		errJSON(w, 404, "本地副本已丢失，无法同步（请在填写页重新上传附件）")
+		return
+	}
+	operator := f.UploadedBy
+	if s := currentUser(r); s != nil && s.UserID != "" {
+		operator = s.UserID
+	}
+	if operator == "" {
+		errJSON(w, 400, "缺少钉钉操作人身份，无法同步")
+		return
+	}
+	go func() {
+		spaceID, driveFID, err := retryFileToDrive(f.ID, f.LocalPath, f.FileName, operator)
+		if err != nil {
+			updateFileDriveStatus(f.ID, "failed", "", "", err.Error())
+			log.Printf("管理员重新同步钉盘失败(附件 %d, %s): %s", f.ID, f.FileName, err.Error())
+			return
+		}
+		updateFileDriveStatus(f.ID, "uploaded", spaceID, driveFID, "")
+		log.Printf("管理员重新同步钉盘成功(附件 %d, %s)", f.ID, f.FileName)
+	}()
+	okJSON(w, map[string]any{"message": "已在后台同步，稍后刷新查看状态"})
+}
+
+// hAttachmentDelete 管理员：删除已丢失的附件记录（本地与钉盘都取不到时清理脏数据）
+func hAttachmentDelete(w http.ResponseWriter, r *http.Request) {
+	fid, hasID := intVal(readJSON(r), "id")
+	if !hasID {
+		errJSON(w, 400, "缺少附件编号")
+		return
+	}
+	f := fileByID(fid)
+	if f == nil {
+		errJSON(w, 404, "附件不存在")
+		return
+	}
+	if f.LocalPath != "" && fileExists(f.LocalPath) {
+		_ = os.Remove(f.LocalPath)
+	}
+	if _, err := db.Exec("DELETE FROM req_files WHERE id=?", fid); err != nil {
+		internalErr(w, "删除附件", err)
+		return
+	}
+	log.Printf("管理员删除附件记录: id=%d（需求 %d, %s）", fid, f.ReqID, f.FileName)
 	okJSON(w, nil)
 }
 
@@ -719,8 +987,17 @@ func hReqDelete(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 403, "无权限：只能删除自己提交的需求")
 		return
 	}
+	// 联动清理附件记录与本地文件
+	if files := listFilesByReq(rid); files != nil {
+		for _, f := range files {
+			if f.LocalPath != "" && fileExists(f.LocalPath) {
+				_ = os.Remove(f.LocalPath)
+			}
+		}
+	}
+	_, _ = db.Exec("DELETE FROM req_files WHERE req_id=?", rid)
 	if _, err := db.Exec("DELETE FROM req_items WHERE id=?", rid); err != nil {
-		internalErr(w, "添加管理员", err)
+		internalErr(w, "删除需求", err)
 		return
 	}
 	okJSON(w, nil)

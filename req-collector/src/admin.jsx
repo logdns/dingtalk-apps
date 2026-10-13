@@ -21,6 +21,10 @@ function RequirementManager() {
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(null);
   const [editForm] = Form.useForm();
+  const [attFiles, setAttFiles] = useState(null);
+  const fileInputRef = useRef(null);
+  const [attReqId, setAttReqId] = useState(null);
+  const [attLoading, setAttLoading] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -52,6 +56,50 @@ function RequirementManager() {
     else Message.error(data.error || "保存失败");
   };
 
+  const loadAttachments = async (reqId) => {
+    const data = await window.WBAuth.api("/api/requirements/attachments?req_id=" + reqId);
+    if (data.ok) setAttFiles(data.files || []);
+    else Message.error(data.error || "附件加载失败");
+    return (data.files || []).some(f => f.drive_status === "pending");
+  };
+
+  const openAttachments = async (record) => {
+    setAttReqId(record.id); setAttFiles([]); setAttLoading(true);
+    try {
+      // 有附件还在同步钉盘时，短暂轮询刷新状态
+      let pending = await loadAttachments(record.id);
+      let tries = 0;
+      while (pending && tries < 8) {
+        await new Promise(r => setTimeout(r, 2000));
+        pending = await loadAttachments(record.id);
+        tries++;
+      }
+    } catch (e) { Message.error("网络异常：" + e.message); }
+    setAttLoading(false);
+  };
+
+  const retrySync = async (f) => {
+    const data = await post("/api/admin/attachment/retry", { id: f.id });
+    if (data.ok) { Message.success("已在后台同步，稍后刷新"); setTimeout(() => loadAttachments(f.req_id), 3000); }
+    else Message.error(data.error || "同步失败");
+  };
+
+  // 管理员补传附件（原文件丢失时可直接代传）
+  const reupload = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file || !attReqId) return;
+    const d = await window.WBAuth.uploadFile(attReqId, file, 60000);
+    if (d.ok) { Message.success("已补传，正在后台同步钉盘"); loadAttachments(attReqId); }
+    else Message.error(d.error || "补传失败");
+  };
+
+  const dropFile = async (f) => {
+    const data = await post("/api/admin/attachment/delete", { id: f.id });
+    if (data.ok) { Message.success("已删除该附件记录"); loadAttachments(f.req_id); }
+    else Message.error(data.error || "删除失败");
+  };
+
   const columns = [
     { title: "#", dataIndex: "id", width: 56 },
     { title: "部门", dataIndex: "department", width: 84 },
@@ -63,6 +111,8 @@ function RequirementManager() {
     { title: "紧急程度", dataIndex: "urgency", width: 90,
       render: v => <Tag color={URGENCY_COLOR[v] || "gray"}>{v}</Tag> },
     { title: "能否实现", dataIndex: "feasibility", width: 100 },
+    { title: "附件", dataIndex: "_att", width: 90,
+      render: (v, r) => <Button size="mini" onClick={() => openAttachments(r)}>📎 查看</Button> },
     { title: "操作", dataIndex: "_op", width: 130, fixed: "right",
       render: (v, r) => (
         <Space>
@@ -112,6 +162,57 @@ function RequirementManager() {
             <Input maxLength={500} />
           </FormItem>
         </Form>
+      </Modal>
+
+      <Modal title={"📎 附件 - 需求 #" + (attReqId || "")}
+             visible={attFiles !== null}
+             onCancel={() => setAttFiles(null)}
+             footer={null} style={{ width: 520 }}>
+        {attLoading ? <Typography.Text>加载中…</Typography.Text> : (
+          attFiles && attFiles.length ? (
+            <div>
+              {attFiles.map(f => (
+                <div key={f.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                                          padding: "8px 0", borderBottom: "1px solid #f0f1f2" }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontWeight: 500, wordBreak: "break-all" }}>{f.file_name}</div>
+                    <div style={{ fontSize: 12, color: "#86909c" }}>
+                      {window.WBAuth.formatSize(f.file_size)} · {f.uploaded_by_name || "未知"} · {f.created_at}
+                      {f.drive_status === "uploaded" ? " · 已存钉盘"
+                        : f.drive_status === "pending" ? " · 同步钉盘中…"
+                        : f.available === false ? " · ⚠️ 文件已丢失"
+                        : " · 仅服务器本地"}
+                    </div>
+                  </div>
+                  <Space size={4}>
+                    {f.available === false ? null : (
+                      <Button size="mini" type="primary" href={window.WBAuth.downloadURL(f.id)}>下载</Button>
+                    )}
+                    {f.drive_status !== "uploaded" && f.available !== false ? (
+                      <Button size="mini" onClick={() => retrySync(f)}>同步钉盘</Button>
+                    ) : null}
+                    {f.available === false ? (
+                      <Popconfirm title="删除这条已丢失的附件记录？" onOk={() => dropFile(f)}>
+                        <Button size="mini" status="danger">删除记录</Button>
+                      </Popconfirm>
+                    ) : null}
+                  </Space>
+                </div>
+              ))}
+            </div>
+          ) : <Empty description="该需求暂无附件" />
+        )}
+        {attFiles !== null && attReqId ? (
+          <div style={{ marginTop: 12 }}>
+            <input type="file" ref={fileInputRef} style={{ display: "none" }} onChange={reupload} />
+            <Button size="mini" onClick={() => fileInputRef.current && fileInputRef.current.click()}>
+              ＋ 补传附件
+            </Button>
+            <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+              原附件丢失时，管理员可代传
+            </Typography.Text>
+          </div>
+        ) : null}
       </Modal>
     </div>
   );
